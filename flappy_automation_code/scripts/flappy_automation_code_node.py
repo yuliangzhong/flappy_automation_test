@@ -7,7 +7,7 @@ from geometry_msgs.msg import Vector3
 import math
 
 R = 3.549 # m
-AY_MAX = 35/10 # m/s2
+AY_MAX = 35 # m/s2
 ANGLES = np.linspace(-45,45,9)/180*math.pi # radius
 STONE_WIDTH = 1 # m
 
@@ -51,6 +51,7 @@ class Agent(object):
         acc_x = -0.5
         acc_y = self.calculateAccY(msg.y)
         self.pub_acc_cmd.publish(Vector3(acc_x, acc_y, 0))
+        print("x: %.2f, y: %.2f" % (self.pos_x, self.pos_y))
 
 
     def laserScanCallback(self, msg):
@@ -66,6 +67,7 @@ class Agent(object):
 
             # Step 3: set y-axis goal
             self.setGoalY()
+        pass
 
 
 
@@ -158,15 +160,17 @@ class Agent(object):
 
     def calculateAccY(self, Vy):
         Dy = self.y_goal - self.pos_y
-        ay = 0
+        pd_ctrl_range = 0.3 # [m]
+        Kp = 50
+        Kd = 20
 
         # if very close: pd control
-        if abs(Dy) < 0.25:
-            ay = 20 * Dy + 20 * (0 - Vy)
+        if abs(Dy) < pd_ctrl_range:
+            ay = Kp * Dy + Kd * (0 - Vy)
         else:
         # bang - bang control
             if Dy >= 0 and Vy >= 0:
-                S1 = Vy**2/2/AY_MAX
+                S1 = Vy**2/2/AY_MAX + pd_ctrl_range
                 if Dy > S1:
                     ay = AY_MAX
                 else:
@@ -176,8 +180,8 @@ class Agent(object):
             if Dy < 0 and Vy >= 0:
                 ay = -AY_MAX
             if Dy < 0 and Vy < 0:
-                S1 = Vy**2/2/AY_MAX
-                if Dy < S1:
+                S1 = Vy**2/2/AY_MAX + pd_ctrl_range
+                if Dy < -S1:
                     ay = -AY_MAX
                 else:
                     ay = AY_MAX
