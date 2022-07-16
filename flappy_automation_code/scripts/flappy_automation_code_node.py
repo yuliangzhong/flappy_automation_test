@@ -7,12 +7,14 @@ from geometry_msgs.msg import Vector3
 import math
 import time
 
+DELTA_T = 1/30
 LASER_NUM = 9
 R = 3.549 # m
 AY_MAX = 35 # m/s2
 ANGLES = np.linspace(-45,45,9)/180*math.pi # radius
 STONE_WIDTH = 0.80 # m
-GATE_HEIGHT = 0.60 # m
+GATE_HEIGHT = 0.50 # m
+UP_LOW_FENCE = 0.2 # m
 
 class Agent(object):
     def __init__(self):
@@ -38,13 +40,9 @@ class Agent(object):
         # obstacle memory
         # -min-|forward|-max-       -min-|backward|-max-
         # 0-free; 1-stone
-        self.resolution = 25
-        self.forward_obstacles = np.zeros(self.resolution)
-        self.forward_max_x = 0
-        self.forward_min_x = 999
-        self.backward_obstacles = np.zeros(self.resolution)
-        self.backward_max_x = 0
-        self.backward_min_x = 999
+        self.resolution = 200
+        self.obstacleMemoryReset('f') # 'f': forward
+        self.obstacleMemoryReset('b') # 'b': backward
 
         # set y-axis goal
         self.ahead_obstacle_max_x = 0
@@ -53,15 +51,17 @@ class Agent(object):
     def velCallback(self, msg):
 
         # forward Euler position integral
-        self.pos_x += msg.x*1/30
-        self.pos_y += msg.y*1/30
+        self.pos_x += msg.x*DELTA_T
+        self.pos_y += msg.y*DELTA_T
         
+        # setup accelerations
         acc_x = -0.5
         acc_y = self.calculateAccY(msg.y)
         # acc_y = 0.0
         self.pub_acc_cmd.publish(Vector3(acc_x, acc_y, 0))
-        print("x: %.2f, y: %.2f" % (self.pos_x, self.pos_y))
 
+        # print("x: %.2f, y: %.2f" % (self.pos_x, self.pos_y))
+        # print("%.2f" %((self.pos_y - self.pos_low) / (self.pos_up - self.pos_low) * 100))
 
     def laserScanCallback(self, msg):
 
@@ -83,18 +83,18 @@ class Agent(object):
 
     def setUpLowBound(self, msg):
         if self.pos_low_flag==0 and msg.ranges[0] < R: 
-            self.pos_low = msg.ranges[0]*math.sin(-math.pi/4) + self.pos_y
+            self.pos_low = msg.ranges[0]*math.sin(-math.pi/4) + self.pos_y + UP_LOW_FENCE
             self.pos_low_flag = 1
 
-        if self.pos_up_flag==0 and msg.ranges[8] < R:
-            self.pos_up = msg.ranges[8]*math.sin(math.pi/4) + self.pos_y
+        if self.pos_up_flag==0 and msg.ranges[LASER_NUM-1] < R:
+            self.pos_up = msg.ranges[LASER_NUM-1]*math.sin(math.pi/4) + self.pos_y - UP_LOW_FENCE
             self.pos_up_flag = 1
 
         if self.pos_low_flag==0 and msg.ranges[0] >= R: 
             self.goal_y -= 0.1
             return
         
-        if self.pos_up_flag==0 and msg.ranges[8] >= R:
+        if self.pos_up_flag==0 and msg.ranges[LASER_NUM-1] >= R:
             self.goal_y += 0.1
             return
 
@@ -110,10 +110,11 @@ class Agent(object):
                 x = self.pos_x + msg.ranges[i]*math.cos(ANGLES[i])
                 y = self.pos_y + msg.ranges[i]*math.sin(ANGLES[i])
                 # reject up and low bound
-                if abs(y - self.pos_low) > 0.02 and abs(y - self.pos_up) > 0.02:
+                if y > self.pos_low and y < self.pos_up:
                     y_num = int((y - self.pos_low) / (self.pos_up - self.pos_low) * self.resolution)
                     x_temp.append(x)
                     y_num_temp.append(y_num)
+
         # arrange scan data
         if len(x_temp) > 0:
             x_temp = np.array(x_temp)
@@ -144,9 +145,7 @@ class Agent(object):
                 self.forward_obstacles = self.backward_obstacles
                 self.forward_max_x = self.backward_max_x
                 self.forward_min_x = self.backward_min_x
-                self.backward_obstacles = np.zeros(self.resolution)
-                self.backward_max_x = 0
-                self.backward_min_x = 999
+                self.obstacleMemoryReset('b')
         # print("-----------------------")
         # print("posx: %.2f, forward:[%.2f, %.2f], backward:[%.2f, %.2f]" % (self.pos_x, self.forward_min_x, self.forward_max_x, self.backward_min_x, self.backward_max_x))
         # print(self.forward_obstacles)
@@ -168,12 +167,19 @@ class Agent(object):
             signs = np.diff(np.concatenate((np.array([1]), self.forward_obstacles, np.array([1])), axis=0))
             zero_starts = np.where(signs==-1)[0]
             zero_ends = np.where(signs==1)[0]
-            # zero_best = int(GATE_HEIGHT / (self.pos_up - self.pos_low) * self.resolution)
+
+            zero_count = zero_ends - zero_starts
+            zero_best = round(GATE_HEIGHT / (self.pos_up - self.pos_low) * self.resolution)
             
+            if min(np.abs(zero_count - zero_best)) < 0.2*zero_best:
+                index = np.argmin(np.abs(zero_count - zero_best))
+            else:
+                index = np.argmax(zero_count)
             # zero_count = zero_ends - zero_starts
             # zero_count[np.where(zero_count<zero_best)] = 999 # can't be the gate
             # index = np.argmin(zero_count)
-            index = np.argmax(zero_ends - zero_starts)
+            # index = np.argmax(zero_ends - zero_starts)
+            print(zero_ends - zero_starts, zero_best)
             self.goal_y = (zero_starts[index] + zero_ends[index]) / 2 / self.resolution * (self.pos_up - self.pos_low) + self.pos_low
             self.goal_y = max(min(self.goal_y, self.pos_up-0.2), self.pos_low+0.2)
             # print("posx: %.2f, ahead:[%.2f, %.2f], forward:[%.2f, %.2f], backward:[%.2f, %.2f]" % (self.pos_x, self.ahead_obstacle_min_x, self.ahead_obstacle_max_x, self.forward_min_x, self.forward_max_x, self.backward_min_x, self.backward_max_x))
@@ -186,6 +192,24 @@ class Agent(object):
         #     self.goal_y = (zero_starts[index] + zero_ends[index]) / 2 / self.resolution * (self.pos_up - self.pos_low) + self.pos_low
 
         #     self.goal_y = max(min(self.goal_y, self.pos_up-0.5), self.pos_low+0.5)
+
+    def obstacleMemoryReset(self, flag):
+        if flag == 'f':
+            self.forward_obstacles = np.zeros(self.resolution)
+            self.forward_max_x = 0
+            self.forward_min_x = 999
+            # if self.pos_up_flag==1 and self.pos_low_flag==1:
+            #     N = UP_LOW_FENCE / (self.pos_up - self.pos_low) * self.resolution
+            #     self.forward_obstacles[0:N] = 1
+            #     self.forward_obstacles[-N:-1] = 1
+        elif flag == 'b':
+            self.backward_obstacles = np.zeros(self.resolution)
+            self.backward_max_x = 0
+            self.backward_min_x = 999
+            # if self.pos_up_flag==1 and self.pos_low_flag==1:
+            #     N = UP_LOW_FENCE / (self.pos_up - self.pos_low) * self.resolution
+            #     self.backward_obstacles[0:N] = 1
+            #     self.backward_obstacles[-N:-1] = 1
 
 
             
