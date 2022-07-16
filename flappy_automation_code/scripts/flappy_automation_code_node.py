@@ -5,11 +5,14 @@ from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Vector3
 
 import math
+import time
 
+LASER_NUM = 9
 R = 3.549 # m
 AY_MAX = 35 # m/s2
 ANGLES = np.linspace(-45,45,9)/180*math.pi # radius
-STONE_WIDTH = 1 # m
+STONE_WIDTH = 0.80 # m
+GATE_HEIGHT = 0.60 # m
 
 class Agent(object):
     def __init__(self):
@@ -24,7 +27,7 @@ class Agent(object):
         self.pos_y = 0
 
         # define y-axis goal
-        self.y_goal = 0
+        self.goal_y = 0
 
         # position up bound and low bound
         self.pos_up = 0
@@ -33,14 +36,19 @@ class Agent(object):
         self.pos_low_flag = 0 # 0: not set; 1: set
 
         # obstacle memory
+        # -min-|forward|-max-       -min-|backward|-max-
+        # 0-free; 1-stone
         self.resolution = 25
         self.forward_obstacles = np.zeros(self.resolution)
-        self.forward_x = 0 # maximum forward obstacle x;    0: not set
+        self.forward_max_x = 0
+        self.forward_min_x = 999
         self.backward_obstacles = np.zeros(self.resolution)
-        self.backward_x = 0 # maximum backward obstacle x;  0: not set
-        
+        self.backward_max_x = 0
+        self.backward_min_x = 999
+
         # set y-axis goal
-        self.ahead_obstacle_x = 0
+        self.ahead_obstacle_max_x = 0
+        self.ahead_obstacle_min_x = 999
 
     def velCallback(self, msg):
 
@@ -50,6 +58,7 @@ class Agent(object):
         
         acc_x = -0.5
         acc_y = self.calculateAccY(msg.y)
+        # acc_y = 0.0
         self.pub_acc_cmd.publish(Vector3(acc_x, acc_y, 0))
         print("x: %.2f, y: %.2f" % (self.pos_x, self.pos_y))
 
@@ -66,9 +75,10 @@ class Agent(object):
             self.obstacleUpdate(msg)
 
             # Step 3: set y-axis goal
+            starttime = time.time()
             self.setGoalY()
-        pass
-
+            endtime = time.time()
+            # print("set goal time cost: %.15f s" % (endtime-starttime))
 
 
     def setUpLowBound(self, msg):
@@ -81,22 +91,25 @@ class Agent(object):
             self.pos_up_flag = 1
 
         if self.pos_low_flag==0 and msg.ranges[0] >= R: 
-            self.y_goal -= 0.1
+            self.goal_y -= 0.1
             return
         
         if self.pos_up_flag==0 and msg.ranges[8] >= R:
-            self.y_goal += 0.1
+            self.goal_y += 0.1
             return
 
 
     def obstacleUpdate(self, msg):
+        # measurement temp storage
         x_temp = []
         y_num_temp = []
+
         # process scan data
-        for i in range(9):
-            if msg.ranges[i] < R:
+        for i in range(LASER_NUM):
+            if msg.ranges[i] < R: # obstacles
                 x = self.pos_x + msg.ranges[i]*math.cos(ANGLES[i])
                 y = self.pos_y + msg.ranges[i]*math.sin(ANGLES[i])
+                # reject up and low bound
                 if abs(y - self.pos_low) > 0.02 and abs(y - self.pos_up) > 0.02:
                     y_num = int((y - self.pos_low) / (self.pos_up - self.pos_low) * self.resolution)
                     x_temp.append(x)
@@ -107,59 +120,78 @@ class Agent(object):
             y_num_temp = np.array(y_num_temp)
             x_range = max(x_temp) - min(x_temp)
             if x_range < STONE_WIDTH:
-                self.forward_x = max([max(x_temp), self.forward_x])
-                for i in y_num_temp:
-                    self.forward_obstacles[i] = 1
+                self.forward_max_x = max([max(x_temp), self.forward_max_x])
+                self.forward_min_x = min([min(x_temp), self.forward_min_x])
+                self.forward_obstacles[y_num_temp] = 1
             else:
                 x_middle = (max(x_temp) + min(x_temp)) / 2
                 forward_index = np.where(x_temp < x_middle)
                 backward_index = np.where(x_temp >= x_middle)
 
                 x_forward = x_temp[forward_index]
-                self.forward_x = max([max(x_forward), self.forward_x])
+                self.forward_max_x = max([max(x_forward), self.forward_max_x])
+                self.forward_min_x = min([min(x_forward), self.forward_min_x])
                 y_num_forward = y_num_temp[forward_index]
                 self.forward_obstacles[y_num_forward] = 1
 
                 x_backward = x_temp[backward_index]
-                self.backward_x = max([max(x_backward), self.backward_x])
+                self.backward_max_x = max([max(x_backward), self.backward_max_x])
+                self.backward_min_x = min([min(x_backward), self.backward_min_x])
                 y_num_backward = y_num_temp[backward_index]
                 self.backward_obstacles[y_num_backward] = 1
             
-            if abs(self.forward_x - self.backward_x) < 0.2:
+            if abs(self.forward_max_x - self.backward_max_x) < 0.2:
                 self.forward_obstacles = self.backward_obstacles
-                self.forward_x = self.backward_x
+                self.forward_max_x = self.backward_max_x
+                self.forward_min_x = self.backward_min_x
                 self.backward_obstacles = np.zeros(self.resolution)
-                self.backward_x = 0
+                self.backward_max_x = 0
+                self.backward_min_x = 999
         # print("-----------------------")
-        # print("forward_x: %.3f, backward_x: %.3f" % (self.forward_x, self.backward_x))
+        # print("posx: %.2f, forward:[%.2f, %.2f], backward:[%.2f, %.2f]" % (self.pos_x, self.forward_min_x, self.forward_max_x, self.backward_min_x, self.backward_max_x))
         # print(self.forward_obstacles)
         # print(self.backward_obstacles)
 
 
     def setGoalY(self):
-        if self.pos_x > self.ahead_obstacle_x - 0.35 and self.pos_x < self.ahead_obstacle_x + 0.6:
-            print("[LOCKED], %.2f, pos x: %.2f, ahead x: %.2f, forward x: %.2f" % (self.pos_x - self.ahead_obstacle_x, self.pos_x, self.ahead_obstacle_x, self.forward_x))
+
+        # update obstacle x ahead of the bird
+        if self.pos_x > self.forward_min_x - 1.0:
+            self.ahead_obstacle_max_x = self.forward_max_x
+            self.ahead_obstacle_min_x = self.forward_min_x
+
+        # do not change y-goal when pass the gate
+        if self.pos_x > self.ahead_obstacle_min_x - 0.15 and self.pos_x < self.ahead_obstacle_max_x + 0.30:
             return
-        
-        print("pos x: %.2f, ahead x: %.2f, forward x: %.2f" % (self.pos_x, self.ahead_obstacle_x, self.forward_x))
-
-        if self.pos_x >= self.ahead_obstacle_x + 0.6:
-            self.ahead_obstacle_x = self.forward_x
-
-        if sum(self.forward_obstacles) > 0.1*self.resolution:
+            # print("[LOCKED], posx: %.2f, ahead:[%.2f, %.2f], forward:[%.2f, %.2f], backward:[%.2f, %.2f]" % (self.pos_x, self.ahead_obstacle_min_x, self.ahead_obstacle_max_x, self.forward_min_x, self.forward_max_x, self.backward_min_x, self.backward_max_x))
+        else:
             signs = np.diff(np.concatenate((np.array([1]), self.forward_obstacles, np.array([1])), axis=0))
             zero_starts = np.where(signs==-1)[0]
             zero_ends = np.where(signs==1)[0]
+            # zero_best = int(GATE_HEIGHT / (self.pos_up - self.pos_low) * self.resolution)
+            
+            # zero_count = zero_ends - zero_starts
+            # zero_count[np.where(zero_count<zero_best)] = 999 # can't be the gate
+            # index = np.argmin(zero_count)
             index = np.argmax(zero_ends - zero_starts)
-            self.y_goal = (zero_starts[index] + zero_ends[index]) / 2 / self.resolution * (self.pos_up - self.pos_low) + self.pos_low
+            self.goal_y = (zero_starts[index] + zero_ends[index]) / 2 / self.resolution * (self.pos_up - self.pos_low) + self.pos_low
+            self.goal_y = max(min(self.goal_y, self.pos_up-0.2), self.pos_low+0.2)
+            # print("posx: %.2f, ahead:[%.2f, %.2f], forward:[%.2f, %.2f], backward:[%.2f, %.2f]" % (self.pos_x, self.ahead_obstacle_min_x, self.ahead_obstacle_max_x, self.forward_min_x, self.forward_max_x, self.backward_min_x, self.backward_max_x))
 
-            self.y_goal = max(min(self.y_goal, self.pos_up-0.5), self.pos_low+0.5)
+        # if sum(self.forward_obstacles) > 0.1*self.resolution:
+        #     signs = np.diff(np.concatenate((np.array([1]), self.forward_obstacles, np.array([1])), axis=0))
+        #     zero_starts = np.where(signs==-1)[0]
+        #     zero_ends = np.where(signs==1)[0]
+        #     index = np.argmax(zero_ends - zero_starts)
+        #     self.goal_y = (zero_starts[index] + zero_ends[index]) / 2 / self.resolution * (self.pos_up - self.pos_low) + self.pos_low
+
+        #     self.goal_y = max(min(self.goal_y, self.pos_up-0.5), self.pos_low+0.5)
 
 
             
 
     def calculateAccY(self, Vy):
-        Dy = self.y_goal - self.pos_y
+        Dy = self.goal_y - self.pos_y
         pd_ctrl_range = 0.3 # [m]
         Kp = 50
         Kd = 20
