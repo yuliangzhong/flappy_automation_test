@@ -14,7 +14,7 @@ AY_MAX = 35 # m/s2
 ANGLES = np.linspace(-45,45,9)/180*math.pi # radius
 STONE_WIDTH = 0.80 # m
 GATE_HEIGHT = 0.50 # m
-UP_LOW_FENCE = 0.2 # m
+UP_LOW_FENCE = 0.7 # m
 
 class Agent(object):
     def __init__(self):
@@ -25,11 +25,13 @@ class Agent(object):
         self.laser_sub = rospy.Subscriber("/flappy_laser_scan", LaserScan, self.laserScanCallback)
 
         # calculate the bird position by velocity integral
-        self.pos_x = 0
-        self.pos_y = 0
+        self.pos_x = 0.0
+        self.pos_y = 0.0
+        self.dx = 0.0
+        self.dy = 0.0
 
         # define y-axis goal
-        self.goal_y = 0
+        self.goal_y = 2
 
         # position up bound and low bound
         self.pos_up = 0
@@ -48,23 +50,32 @@ class Agent(object):
         self.ahead_obstacle_max_x = 0
         self.ahead_obstacle_min_x = 999
 
+        self.count = 0
+
     def velCallback(self, msg):
 
-        # forward Euler position integral
-        self.pos_x += msg.x*DELTA_T
-        self.pos_y += msg.y*DELTA_T
-        
+        # position integral
+        self.pos_x += self.dx
+        self.pos_y += self.dy
+
         # setup accelerations
         acc_x = -0.5
         acc_y = self.calculateAccY(msg.y)
         # acc_y = 0.0
         self.pub_acc_cmd.publish(Vector3(acc_x, acc_y, 0))
+        
+        Vx_p = max([msg.x + acc_x*DELTA_T, 0.0])
+        self.dx = (msg.x + Vx_p) * DELTA_T / 2
+        self.dy = msg.y*DELTA_T + acc_y*DELTA_T*DELTA_T/2
 
-        # print("x: %.2f, y: %.2f" % (self.pos_x, self.pos_y))
-        # print("%.2f" %((self.pos_y - self.pos_low) / (self.pos_up - self.pos_low) * 100))
+        t = self.count * DELTA_T
+        # print("t: %.3f, x: %.5f, y: %.3f, Vx: %.5f, Vy: %.3f, ay: %.3f" % (t, self.pos_x, self.pos_y, msg.x, msg.y, acc_y))
+        # print("(%.2f, %.2f)" %((self.pos_y - self.pos_low), self.pos_up - self.pos_y))
+        self.count += 1
 
     def laserScanCallback(self, msg):
-
+        
+        # pass
         ##### Main Logic for Each Scan #####
 
         # Step 1: set tunnel up and low bound
@@ -79,7 +90,7 @@ class Agent(object):
             self.setGoalY()
             endtime = time.time()
             # print("set goal time cost: %.15f s" % (endtime-starttime))
-
+        
 
     def setUpLowBound(self, msg):
         if self.pos_low_flag==0 and msg.ranges[0] < R: 
@@ -147,7 +158,7 @@ class Agent(object):
                 self.forward_min_x = self.backward_min_x
                 self.obstacleMemoryReset('b')
         # print("-----------------------")
-        # print("posx: %.2f, forward:[%.2f, %.2f], backward:[%.2f, %.2f]" % (self.pos_x, self.forward_min_x, self.forward_max_x, self.backward_min_x, self.backward_max_x))
+        print("posx: %.2f, forward:[%.2f, %.2f], backward:[%.2f, %.2f]" % (self.pos_x, self.forward_min_x, self.forward_max_x, self.backward_min_x, self.backward_max_x))
         # print(self.forward_obstacles)
         # print(self.backward_obstacles)
 
@@ -179,7 +190,7 @@ class Agent(object):
             # zero_count[np.where(zero_count<zero_best)] = 999 # can't be the gate
             # index = np.argmin(zero_count)
             # index = np.argmax(zero_ends - zero_starts)
-            print(zero_ends - zero_starts, zero_best)
+            # print(zero_ends - zero_starts, zero_best)
             self.goal_y = (zero_starts[index] + zero_ends[index]) / 2 / self.resolution * (self.pos_up - self.pos_low) + self.pos_low
             self.goal_y = max(min(self.goal_y, self.pos_up-0.2), self.pos_low+0.2)
             # print("posx: %.2f, ahead:[%.2f, %.2f], forward:[%.2f, %.2f], backward:[%.2f, %.2f]" % (self.pos_x, self.ahead_obstacle_min_x, self.ahead_obstacle_max_x, self.forward_min_x, self.forward_max_x, self.backward_min_x, self.backward_max_x))
@@ -216,9 +227,16 @@ class Agent(object):
 
     def calculateAccY(self, Vy):
         Dy = self.goal_y - self.pos_y
-        pd_ctrl_range = 0.3 # [m]
+        
+        if Vy >= 0:
+            # S = (Vy+AY_MAX*DELTA_T)**2/2/AY_MAX # > 0
+            pd_ctrl_range = Vy*DELTA_T + AY_MAX*DELTA_T*DELTA_T/2 # [m]
+        else:
+            # S = (Vy-AY_MAX*DELTA_T)**2/2/AY_MAX # > 0
+            pd_ctrl_range = -Vy*DELTA_T + AY_MAX*DELTA_T*DELTA_T/2 # [m]
+        
         Kp = 50
-        Kd = 20
+        Kd = 25
 
         # if very close: pd control
         if abs(Dy) < pd_ctrl_range:
@@ -226,8 +244,8 @@ class Agent(object):
         else:
         # bang - bang control
             if Dy >= 0 and Vy >= 0:
-                S1 = Vy**2/2/AY_MAX + pd_ctrl_range
-                if Dy > S1:
+                S = Vy**2/2/AY_MAX + pd_ctrl_range
+                if Dy > S:
                     ay = AY_MAX
                 else:
                     ay = -AY_MAX
@@ -236,15 +254,12 @@ class Agent(object):
             if Dy < 0 and Vy >= 0:
                 ay = -AY_MAX
             if Dy < 0 and Vy < 0:
-                S1 = Vy**2/2/AY_MAX + pd_ctrl_range
-                if Dy < -S1:
+                S = Vy**2/2/AY_MAX + pd_ctrl_range
+                if Dy < -S:
                     ay = -AY_MAX
                 else:
                     ay = AY_MAX
         return ay
-                
-
-
 
 
 if __name__ == '__main__':
