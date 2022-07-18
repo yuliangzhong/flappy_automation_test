@@ -8,13 +8,15 @@ import math
 import time
 
 DELTA_T = 1/30
+AX_MAX = 3
 AY_MAX = 35 # m/s2
 
 LASER_NUM = 9
 LASER_RANGE = 3.549 # m
 ANGLES = np.linspace(-45,45,9)/180*math.pi # radius
 
-STONE_WIDTH = 0.80 # m
+OBSTACLE_WIDTH = 0.5 # m
+OBSTACLE_GAP = 1.92 # m
 GATE_HEIGHT = 0.50 # m
 UP_LOW_FENCE = 0.7 # m
 
@@ -54,6 +56,7 @@ class Agent(object):
         self.front_obstacle_max_x = 0
         self.front_obstacle_min_x = 999
 
+        # print_out
         self.time_count = 0
 
     def velCallback(self, msg):
@@ -63,10 +66,10 @@ class Agent(object):
         self.pos_y += self.dy
 
         # setup accelerations
-        acc_x = -0.5
+        # acc_x = -0.5
         # acc_y = 0.0
-        # acc_x = self.calculateAccX(msg.x)
-        acc_y = self.calculateAccY(msg.y)
+        acc_y, t_approx = self.calculateAccY(msg.y)
+        acc_x = self.calculateAccX(msg.x, t_approx)
         self.pub_acc_cmd.publish(Vector3(acc_x, acc_y, 0))
         
         # log dx dy in this time step
@@ -75,7 +78,9 @@ class Agent(object):
         self.dy = msg.y*DELTA_T + acc_y*DELTA_T*DELTA_T/2
 
         t = self.time_count * DELTA_T
-        # print("t: %.3f, x: %.5f, y: %.3f, Vx: %.5f, Vy: %.3f, ay: %.3f" % (t, self.pos_x, self.pos_y, msg.x, msg.y, acc_y))
+        # print("-----------------------")
+        # print("goal_y: %.2f" % self.goal_y)
+        print("t: %.3f, x: %.3f, y: %.3f, Vx: %.3f, ax: %.3f, Vy: %.3f, ay: %.3f, t_approx: %.3f" % (t, self.pos_x, self.pos_y, msg.x, acc_x, msg.y, acc_y, t_approx))
         self.time_count += 1
 
     def laserScanCallback(self, msg):
@@ -134,17 +139,27 @@ class Agent(object):
 
         # arrange scan data
         if len(x_temp) > 0:
+
             x_temp = np.array(x_temp)
             y_temp_ind = np.array(y_temp_ind)
+            pr = [float('{:.2f}'.format(i)) for i in x_temp]
             x_range = max(x_temp) - min(x_temp)
-            if x_range < STONE_WIDTH:
+            print(pr, float('{:.2f}'.format(x_range)))
+
+            if abs(min(x_temp) - self.backward_min_x) < 0.2:
+                self.forward_obstacles = self.backward_obstacles
+                self.forward_max_x = self.backward_max_x
+                self.forward_min_x = self.backward_min_x
+                self.obstacleMemoryReset('b')
+
+            if x_range < OBSTACLE_WIDTH:
                 self.forward_max_x = max([max(x_temp), self.forward_max_x])
                 self.forward_min_x = min([min(x_temp), self.forward_min_x])
                 self.forward_obstacles[y_temp_ind] = 1
-            else:
-                x_middle = (max(x_temp) + min(x_temp)) / 2
-                forward_index = np.where(x_temp < x_middle)
-                backward_index = np.where(x_temp >= x_middle)
+            elif x_range > OBSTACLE_GAP - OBSTACLE_WIDTH:
+                x_border = (max(x_temp) + min(x_temp)) / 2
+                forward_index = np.where(x_temp < x_border)
+                backward_index = np.where(x_temp >= x_border)
 
                 x_forward = x_temp[forward_index]
                 self.forward_max_x = max([max(x_forward), self.forward_max_x])
@@ -157,29 +172,27 @@ class Agent(object):
                 self.backward_min_x = min([min(x_backward), self.backward_min_x])
                 y_num_backward = y_temp_ind[backward_index]
                 self.backward_obstacles[y_num_backward] = 1
+            else:
+                print("FUXKKKKKKKKKKKKKKKKKKK")
             
-            if abs(self.forward_max_x - self.backward_max_x) < 0.2:
-                self.forward_obstacles = self.backward_obstacles
-                self.forward_max_x = self.backward_max_x
-                self.forward_min_x = self.backward_min_x
-                self.obstacleMemoryReset('b')
-        # print("-----------------------")
-        # print("posx: %.2f, forward:[%.2f, %.2f], backward:[%.2f, %.2f]" % (self.pos_x, self.forward_min_x, self.forward_max_x, self.backward_min_x, self.backward_max_x))
-        # print(self.forward_obstacles)
-        # print(self.backward_obstacles)
-
+            # if abs(self.forward_max_x - self.backward_max_x) < 0.2:
+            #     self.forward_obstacles = self.backward_obstacles
+            #     self.forward_max_x = self.backward_max_x
+            #     self.forward_min_x = self.backward_min_x
+            #     self.obstacleMemoryReset('b')
+        print("posx: %.2f, front:[%.2f, %.2f], forward:[%.2f, %.2f], backward:[%.2f, %.2f]" % (self.pos_x, self.front_obstacle_min_x, self.front_obstacle_max_x, self.forward_min_x, self.forward_max_x, self.backward_min_x, self.backward_max_x))        
+        print("---------------------")
 
     def setGoalY(self):
 
         # update obstacle x ahead of the bird
         if self.pos_x > self.forward_min_x - 1.0:
-            self.front_obstacle_max_x = self.forward_max_x
-            self.front_obstacle_min_x = self.forward_min_x
+            self.front_obstacle_max_x = self.forward_max_x + 0.25
+            self.front_obstacle_min_x = self.forward_min_x - 0.15
 
         # do not change y-goal when pass the gate
-        if self.pos_x > self.front_obstacle_min_x - 0.15 and self.pos_x < self.front_obstacle_max_x + 0.25:
-            # print("posx: %.2f, ahead:[%.2f, %.2f], forward:[%.2f, %.2f], backward:[%.2f, %.2f]" % (self.pos_x, self.front_obstacle_min_x, self.front_obstacle_max_x, self.forward_min_x, self.forward_max_x, self.backward_min_x, self.backward_max_x))
-            return
+        if self.pos_x > self.front_obstacle_min_x and self.pos_x < self.front_obstacle_max_x:
+            pass
         else:
             signs = np.diff(np.concatenate((np.array([1]), self.forward_obstacles, np.array([1])), axis=0))
             zero_starts = np.where(signs==-1)[0]
@@ -207,11 +220,7 @@ class Agent(object):
                 self.goal_y = (zero_starts[index] + zero_ends[index]) / 2 / self.resolution * (self.pos_up - self.pos_low) + self.pos_low
 
             
-            print(zero_count, zero_best)
-
-            # self.goal_y = (zero_starts[index] + zero_ends[index]) / 2 / self.resolution * (self.pos_up - self.pos_low) + self.pos_low
-            # print("goal y: %.2f" % self.goal_y)
-            # print("posx: %.2f, ahead:[%.2f, %.2f], forward:[%.2f, %.2f], backward:[%.2f, %.2f]" % (self.pos_x, self.front_obstacle_min_x, self.front_obstacle_max_x, self.forward_min_x, self.forward_max_x, self.backward_min_x, self.backward_max_x))
+            # print(zero_count, zero_best)
 
 
     def obstacleMemoryReset(self, flag):
@@ -229,6 +238,7 @@ class Agent(object):
 
     def calculateAccY(self, Vy):
         Dy = self.goal_y - self.pos_y
+        t_approx = 2*(abs(Dy) / AY_MAX)**0.5
         
         if Vy >= 0:
             # S = (Vy+AY_MAX*DELTA_T)**2/2/AY_MAX # > 0
@@ -237,6 +247,8 @@ class Agent(object):
             # S = (Vy-AY_MAX*DELTA_T)**2/2/AY_MAX # > 0
             pd_ctrl_range = -Vy*DELTA_T + AY_MAX*DELTA_T*DELTA_T/2 # [m]
         
+        # Kp = 10
+        # Kd = 15
         Kp = 50
         Kd = 30
 
@@ -261,10 +273,29 @@ class Agent(object):
                     ay = -AY_MAX
                 else:
                     ay = AY_MAX
-        return ay
+        return ay, t_approx
 
-    def calculateAccX(self, Vx):
-        pass
+    def calculateAccX(self, Vx, t_approx):
+        
+        # set Vx = 2 m/s before game starts
+        if self.front_obstacle_min_x == 999 and Vx < 2:
+            ax = 0.5
+        elif self.front_obstacle_min_x == 999 and Vx >= 2:
+            ax = 0.0
+        else:
+            if self.pos_x > self.front_obstacle_min_x and self.pos_x < self.front_obstacle_max_x:
+                ax = 0.0
+            else:
+                Dx = self.front_obstacle_min_x - self.pos_x
+                S = Vx * t_approx
+                if S <= Dx:
+                    ax = 2 * (Dx - S) / (t_approx**2)
+                elif S <= 2*Dx:
+                    ax = 2 * (S - Dx) / (t_approx**2)
+                else:
+                    ax = -AX_MAX
+
+        return min([ax, AX_MAX])
 
 if __name__ == '__main__':
     try:
