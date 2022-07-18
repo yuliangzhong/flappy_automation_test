@@ -5,7 +5,6 @@ from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Vector3
 
 import math
-import time
 
 DELTA_T = 1/30
 AX_MAX = 3
@@ -73,14 +72,16 @@ class Agent(object):
         self.pub_acc_cmd.publish(Vector3(acc_x, acc_y, 0))
         
         # log dx dy in this time step
-        Vx_p = max([msg.x + acc_x*DELTA_T, 0.0])
+        # acc_x, acc_y should satisfy constraints
+        acc_x = max(min(acc_x, AX_MAX), -AX_MAX)
+        acc_y = max(min(acc_y, AY_MAX), -AY_MAX)
+        # Vx >= 0
+        Vx_p = max(msg.x + acc_x*DELTA_T, 0.0)
         self.dx = (msg.x + Vx_p) * DELTA_T / 2
         self.dy = msg.y*DELTA_T + acc_y*DELTA_T*DELTA_T/2
 
         t = self.time_count * DELTA_T
-        # print("-----------------------")
-        # print("goal_y: %.2f" % self.goal_y)
-        print("t: %.3f, x: %.3f, y: %.3f, Vx: %.3f, ax: %.3f, Vy: %.3f, ay: %.3f, t_approx: %.3f" % (t, self.pos_x, self.pos_y, msg.x, acc_x, msg.y, acc_y, t_approx))
+        print("t: %.3f, x: %.2f, y: %.2f, Vx: %.2f, Vy: %.2f, ax: %.2f, ay: %.2f, goal_y: %.2f, t_approx: %.3f" % (t, self.pos_x, self.pos_y, msg.x, msg.y, acc_x, acc_y, self.goal_y, t_approx))
         self.time_count += 1
 
     def laserScanCallback(self, msg):
@@ -92,14 +93,11 @@ class Agent(object):
             self.setUpLowBound(msg)
 
         else:
-            start_time = time.time()
             # Step 2: update obstacle memory
             self.obstacleUpdate(msg)
 
             # Step 3: set y-axis goal
             self.setGoalY()
-            end_time = time.time()
-            # print("time cost: %.5f" %(end_time - start_time))
         return
 
 
@@ -142,9 +140,7 @@ class Agent(object):
 
             x_temp = np.array(x_temp)
             y_temp_ind = np.array(y_temp_ind)
-            pr = [float('{:.2f}'.format(i)) for i in x_temp]
             x_range = max(x_temp) - min(x_temp)
-            print(pr, float('{:.2f}'.format(x_range)))
 
             if abs(min(x_temp) - self.backward_min_x) < 0.2:
                 self.forward_obstacles = self.backward_obstacles
@@ -173,15 +169,10 @@ class Agent(object):
                 y_num_backward = y_temp_ind[backward_index]
                 self.backward_obstacles[y_num_backward] = 1
             else:
-                print("FUXKKKKKKKKKKKKKKKKKKK")
+                print("Unknown Error in Obstacle Updating!!!")
             
-            # if abs(self.forward_max_x - self.backward_max_x) < 0.2:
-            #     self.forward_obstacles = self.backward_obstacles
-            #     self.forward_max_x = self.backward_max_x
-            #     self.forward_min_x = self.backward_min_x
-            #     self.obstacleMemoryReset('b')
         print("posx: %.2f, front:[%.2f, %.2f], forward:[%.2f, %.2f], backward:[%.2f, %.2f]" % (self.pos_x, self.front_obstacle_min_x, self.front_obstacle_max_x, self.forward_min_x, self.forward_max_x, self.backward_min_x, self.backward_max_x))        
-        print("---------------------")
+
 
     def setGoalY(self):
 
@@ -220,7 +211,8 @@ class Agent(object):
                 self.goal_y = (zero_starts[index] + zero_ends[index]) / 2 / self.resolution * (self.pos_up - self.pos_low) + self.pos_low
 
             
-            # print(zero_count, zero_best)
+            print(zero_count, zero_best)
+            print("-----------------------------------")
 
 
     def obstacleMemoryReset(self, flag):
@@ -238,41 +230,39 @@ class Agent(object):
 
     def calculateAccY(self, Vy):
         Dy = self.goal_y - self.pos_y
-        t_approx = 2*(abs(Dy) / AY_MAX)**0.5
-        
-        if Vy >= 0:
-            # S = (Vy+AY_MAX*DELTA_T)**2/2/AY_MAX # > 0
-            pd_ctrl_range = Vy*DELTA_T + AY_MAX*DELTA_T*DELTA_T/2 # [m]
-        else:
-            # S = (Vy-AY_MAX*DELTA_T)**2/2/AY_MAX # > 0
-            pd_ctrl_range = -Vy*DELTA_T + AY_MAX*DELTA_T*DELTA_T/2 # [m]
-        
-        # Kp = 10
-        # Kd = 15
-        Kp = 50
-        Kd = 30
 
+        S = Vy**2/2/AY_MAX + 2*(abs(Vy)*DELTA_T + AY_MAX*DELTA_T*DELTA_T/2) # [m]
+        # pd_ctrl_range =  (abs(Vy)*DELTA_T + AY_MAX*DELTA_T*DELTA_T/2) # [m]
+        pd_ctrl_range = 0.05 # [m]
         # if very close: pd control
+        Kp = 50
+        Kd = 20
         if abs(Dy) < pd_ctrl_range:
             ay = Kp * Dy + Kd * (0 - Vy)
+            t_approx = abs(Dy)  # just approximation
+
         else:
         # bang - bang control
             if Dy >= 0 and Vy >= 0:
-                S = Vy**2/2/AY_MAX + pd_ctrl_range
                 if Dy > S:
                     ay = AY_MAX
+                    t_approx = -Vy/AY_MAX + (2*Vy*Vy + 4*AY_MAX*Dy)**0.5 / AY_MAX
                 else:
                     ay = -AY_MAX
+                    t_approx = Vy / AY_MAX
             if Dy >= 0 and Vy < 0:
                 ay = AY_MAX
+                t_approx = -Vy/AY_MAX + (2*Vy*Vy + 4*AY_MAX*Dy)**0.5 / AY_MAX
             if Dy < 0 and Vy >= 0:
                 ay = -AY_MAX
+                t_approx = Vy/AY_MAX + (2*Vy*Vy - 4*AY_MAX*Dy)**0.5 / AY_MAX
             if Dy < 0 and Vy < 0:
-                S = Vy**2/2/AY_MAX + pd_ctrl_range
                 if Dy < -S:
                     ay = -AY_MAX
+                    t_approx = Vy/AY_MAX + (2*Vy*Vy - 4*AY_MAX*Dy)**0.5 / AY_MAX
                 else:
                     ay = AY_MAX
+                    t_approx = -Vy / AY_MAX
         return ay, t_approx
 
     def calculateAccX(self, Vx, t_approx):
@@ -284,18 +274,26 @@ class Agent(object):
             ax = 0.0
         else:
             if self.pos_x > self.front_obstacle_min_x and self.pos_x < self.front_obstacle_max_x:
-                ax = 0.0
+                V_out = 3.3 # m/s
+                Dx = self.front_obstacle_max_x - self.pos_x
+                S = (Vx**2 - V_out**2)/2/AX_MAX+ 2*(Vx*DELTA_T + AX_MAX*DELTA_T*DELTA_T/2) # [m]
+                if Dx > S:
+                    ax = AX_MAX
+                else:
+                    ax = -AX_MAX
             else:
                 Dx = self.front_obstacle_min_x - self.pos_x
                 S = Vx * t_approx
                 if S <= Dx:
                     ax = 2 * (Dx - S) / (t_approx**2)
                 elif S <= 2*Dx:
-                    ax = 2 * (S - Dx) / (t_approx**2)
+                    ax = 2 * (Dx - S) / (t_approx**2)
                 else:
                     ax = -AX_MAX
+                    print("bad!")
 
-        return min([ax, AX_MAX])
+        return max(min(ax, AX_MAX), -AX_MAX)
+
 
 if __name__ == '__main__':
     try:
