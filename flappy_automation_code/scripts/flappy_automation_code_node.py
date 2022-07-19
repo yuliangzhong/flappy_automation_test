@@ -5,6 +5,8 @@ from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Vector3
 
 import math
+from qpsolvers import solve_qp
+import time
 
 DELTA_T = 1/30
 AX_MAX = 3
@@ -18,6 +20,32 @@ OBSTACLE_WIDTH = 0.5 # m
 OBSTACLE_GAP = 1.92 # m
 GATE_HEIGHT = 0.50 # m
 UP_LOW_FENCE = 0.7 # m
+
+# y-axis MPC control constants
+N = 20
+A = np.array([[1, -DELTA_T], [0, 1]])
+B = np.array([[-DELTA_T**2/2],[DELTA_T]])
+
+Sx = np.zeros((2*N+2, 2))
+Su = np.zeros((2*N+2, N))
+for iSx in range(N+1):
+    Sx[2*iSx:2*iSx+2, :] = np.linalg.matrix_power(A, iSx)
+    for iSu in range(iSx):
+        Su[2*iSx:2*iSx+2, iSu:iSu+1] = np.dot(np.linalg.matrix_power(A, iSx-1-iSu), B)
+
+Q_bar = np.diag(np.zeros(2*N+2))
+for iQ_bar in range(N+1):
+    Q_bar[2*iQ_bar:2*iQ_bar+2, 2*iQ_bar:2*iQ_bar+2] = np.array([[iQ_bar,0],[0,0.01]])
+Q_bar[-1,-1] = N
+R_bar = np.diag(np.zeros(N))
+
+h = AY_MAX*np.ones((2*N,1))
+G = np.zeros((2*N, N))
+for iG in range(N):
+    G[2*iG:2*iG+2, iG:iG+1] = np.array([[1], [-1]])
+
+H = np.dot(np.dot(Su.T, Q_bar), Su) + R_bar
+F = np.dot(np.dot(Sx.T, Q_bar), Su)
 
 class Agent(object):
     def __init__(self):
@@ -34,26 +62,26 @@ class Agent(object):
         self.dy = 0.0
 
         # define the y-axis goal
-        self.goal_y = 0.0
+        self.goal_y = 1.5
 
-        # position up bound and low bound
-        self.pos_up = 0.0
-        self.pos_up_flag = 0 # 0: not set; 1: set
-        self.pos_low = 0.0
-        self.pos_low_flag = 0 # 0: not set; 1: set
+        # # position up bound and low bound
+        # self.pos_up = 0.0
+        # self.pos_up_flag = 0 # 0: not set; 1: set
+        # self.pos_low = 0.0
+        # self.pos_low_flag = 0 # 0: not set; 1: set
 
-        # obstacle memory
-        # ----- self.pos_up -----
-        # -min-|forward|-max-       -min-|backward|-max-
-        # ----- self.pos_low -----
-        # 0-free; 1-stone
-        self.resolution = 400
-        self.obstacleMemoryReset('f') # 'f': forward
-        self.obstacleMemoryReset('b') # 'b': backward
+        # # obstacle memory
+        # # ----- self.pos_up -----
+        # # -min-|forward|-max-       -min-|backward|-max-
+        # # ----- self.pos_low -----
+        # # 0-free; 1-stone
+        # self.resolution = 400
+        # self.obstacleMemoryReset('f') # 'f': forward
+        # self.obstacleMemoryReset('b') # 'b': backward
 
-        # the obstacle in front of the bird 
-        self.front_obstacle_max_x = 0
-        self.front_obstacle_min_x = 999
+        # # the obstacle in front of the bird 
+        # self.front_obstacle_max_x = 0
+        # self.front_obstacle_min_x = 999
 
         # print_out
         self.time_count = 0
@@ -65,10 +93,9 @@ class Agent(object):
         self.pos_y += self.dy
 
         # setup accelerations
-        # acc_x = -0.5
-        # acc_y = 0.0
+        acc_x = -0.5
         acc_y, t_approx = self.calculateAccY(msg.y)
-        acc_x = self.calculateAccX(msg.x, t_approx)
+        # acc_x = self.calculateAccX(msg.x, t_approx)
         self.pub_acc_cmd.publish(Vector3(acc_x, acc_y, 0))
         
         # log dx dy in this time step
@@ -81,23 +108,23 @@ class Agent(object):
         self.dy = msg.y*DELTA_T + acc_y*DELTA_T*DELTA_T/2
 
         t = self.time_count * DELTA_T
-        print("t: %.3f, x: %.2f, y: %.2f, Vx: %.2f, Vy: %.2f, ax: %.2f, ay: %.2f, goal_y: %.2f, t_approx: %.3f" % (t, self.pos_x, self.pos_y, msg.x, msg.y, acc_x, acc_y, self.goal_y, t_approx))
+        print("t: %.3f, x: %.2f, y: %.9f, Vx: %.2f, Vy: %.7f, ax: %.2f, ay: %.7f, goal_y: %.2f, t_approx: %.3f" % (t, self.pos_x, self.pos_y, msg.x, msg.y, acc_x, acc_y, self.goal_y, t_approx))
         self.time_count += 1
 
     def laserScanCallback(self, msg):
         
         ##### Main Logic for Each Scan #####
 
-        # Step 1: set tunnel up and low bound
-        if self.pos_up_flag==0 or self.pos_low_flag==0:
-            self.setUpLowBound(msg)
+        # # Step 1: set tunnel up and low bound
+        # if self.pos_up_flag==0 or self.pos_low_flag==0:
+        #     self.setUpLowBound(msg)
 
-        else:
-            # Step 2: update obstacle memory
-            self.obstacleUpdate(msg)
+        # else:
+        #     # Step 2: update obstacle memory
+        #     self.obstacleUpdate(msg)
 
-            # Step 3: set y-axis goal
-            self.setGoalY()
+        #     # Step 3: set y-axis goal
+        #     self.setGoalY()
         return
 
 
@@ -229,40 +256,27 @@ class Agent(object):
             
 
     def calculateAccY(self, Vy):
+        # solve y-axis acceleration by MPC --> QP
+
+        starttime = time.time()
         Dy = self.goal_y - self.pos_y
-
-        S = Vy**2/2/AY_MAX + 2*(abs(Vy)*DELTA_T + AY_MAX*DELTA_T*DELTA_T/2) # [m]
-        # pd_ctrl_range =  (abs(Vy)*DELTA_T + AY_MAX*DELTA_T*DELTA_T/2) # [m]
-        pd_ctrl_range = 0.05 # [m]
-        # if very close: pd control
-        Kp = 50
-        Kd = 20
-        if abs(Dy) < pd_ctrl_range:
-            ay = Kp * Dy + Kd * (0 - Vy)
-            t_approx = abs(Dy)  # just approximation
-
-        else:
-        # bang - bang control
-            if Dy >= 0 and Vy >= 0:
-                if Dy > S:
-                    ay = AY_MAX
-                    t_approx = -Vy/AY_MAX + (2*Vy*Vy + 4*AY_MAX*Dy)**0.5 / AY_MAX
-                else:
-                    ay = -AY_MAX
-                    t_approx = Vy / AY_MAX
-            if Dy >= 0 and Vy < 0:
-                ay = AY_MAX
-                t_approx = -Vy/AY_MAX + (2*Vy*Vy + 4*AY_MAX*Dy)**0.5 / AY_MAX
-            if Dy < 0 and Vy >= 0:
-                ay = -AY_MAX
-                t_approx = Vy/AY_MAX + (2*Vy*Vy - 4*AY_MAX*Dy)**0.5 / AY_MAX
-            if Dy < 0 and Vy < 0:
-                if Dy < -S:
-                    ay = -AY_MAX
-                    t_approx = Vy/AY_MAX + (2*Vy*Vy - 4*AY_MAX*Dy)**0.5 / AY_MAX
-                else:
-                    ay = AY_MAX
-                    t_approx = -Vy / AY_MAX
+        x0 = np.array([[Dy],[Vy]])
+        q = np.dot(F.T, x0)
+        u = solve_qp(H, q, G, h, None, None, solver="osqp")
+        ay = u[0]
+        u = u.reshape(N,1)
+        xs = np.dot(Sx,x0) + np.dot(Su,u)
+        xs = xs.reshape(2*N+2)[::2]
+        try:
+            n_time_gaps = np.where(np.abs(xs)<=0.02)[0][0]
+            t_approx = n_time_gaps*DELTA_T
+        except:
+            t_approx = 1.5*N*DELTA_T
+        end_time = time.time()
+        print(Dy, Vy)
+        print(u)
+        print("QP time cost %.7f" % ((end_time - starttime)))
+        print("---------------------------")
         return ay, t_approx
 
     def calculateAccX(self, Vx, t_approx):
