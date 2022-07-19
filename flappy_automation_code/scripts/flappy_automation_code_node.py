@@ -8,6 +8,7 @@ import math
 from qpsolvers import solve_qp
 import time
 
+# system constants
 DELTA_T = 1/30
 AX_MAX = 3
 AY_MAX = 35 # m/s2
@@ -36,7 +37,6 @@ for iSx in range(N+1):
 Q_bar = np.diag(np.zeros(2*N+2))
 for iQ_bar in range(N+1):
     Q_bar[2*iQ_bar:2*iQ_bar+2, 2*iQ_bar:2*iQ_bar+2] = np.array([[iQ_bar,0],[0,0.01]])
-Q_bar[-1,-1] = N
 R_bar = np.diag(np.zeros(N))
 
 h = AY_MAX*np.ones((2*N,1))
@@ -62,7 +62,7 @@ class Agent(object):
         self.dy = 0.0
 
         # define the y-axis goal
-        self.goal_y = 1.5
+        self.goal_y = 0.0
 
         # # position up bound and low bound
         # self.pos_up = 0.0
@@ -258,25 +258,22 @@ class Agent(object):
     def calculateAccY(self, Vy):
         # solve y-axis acceleration by MPC --> QP
 
-        starttime = time.time()
+        # starttime = time.time()
         Dy = self.goal_y - self.pos_y
         x0 = np.array([[Dy],[Vy]])
         q = np.dot(F.T, x0)
-        u = solve_qp(H, q, G, h, None, None, solver="osqp")
+        u = solve_qp(H, q, G, h, solver="osqp")
         ay = u[0]
         u = u.reshape(N,1)
         xs = np.dot(Sx,x0) + np.dot(Su,u)
         xs = xs.reshape(2*N+2)[::2]
         try:
-            n_time_gaps = np.where(np.abs(xs)<=0.02)[0][0]
+            n_time_gaps = N - np.where(np.abs(xs)[::-1]>0.02)[0][0] + 1
             t_approx = n_time_gaps*DELTA_T
         except:
-            t_approx = 1.5*N*DELTA_T
-        end_time = time.time()
-        print(Dy, Vy)
-        print(u)
-        print("QP time cost %.7f" % ((end_time - starttime)))
-        print("---------------------------")
+            t_approx = 0.0
+        # end_time = time.time()
+        # print("QP time cost %.7f" % ((end_time - starttime))) # about 8ms
         return ay, t_approx
 
     def calculateAccX(self, Vx, t_approx):
