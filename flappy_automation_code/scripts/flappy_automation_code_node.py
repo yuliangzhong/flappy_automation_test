@@ -17,7 +17,7 @@ LASER_NUM = 9
 LASER_RANGE = 3.549 # m
 ANGLES = np.linspace(-45,45,9)/180*math.pi # radius
 
-OBSTACLE_WIDTH = 0.5 # m
+OBSTACLE_WIDTH_SUP = 0.60 # m
 OBSTACLE_GAP = 1.92 # m
 GATE_HEIGHT = 0.50 # m
 UP_LOW_FENCE = 0.7 # m
@@ -47,6 +47,7 @@ for iG in range(N):
 H = np.dot(np.dot(Su.T, Q_bar), Su) + R_bar
 F = np.dot(np.dot(Sx.T, Q_bar), Su)
 
+
 class Agent(object):
     def __init__(self):
         # Publisher for sending acceleration commands to flappy bird
@@ -63,28 +64,37 @@ class Agent(object):
 
         # define the y-axis goal
         self.goal_y = 0.0
+        self.goal_y_reach_t = 0.0
 
-        # # position up bound and low bound
-        # self.pos_up = 0.0
-        # self.pos_up_flag = 0 # 0: not set; 1: set
-        # self.pos_low = 0.0
-        # self.pos_low_flag = 0 # 0: not set; 1: set
+        # position up bound and low bound
+        self.pos_up = 0.0
+        self.pos_up_flag = 0 # 0: not set; 1: set
+        self.pos_low = 0.0
+        self.pos_low_flag = 0 # 0: not set; 1: set
 
-        # # obstacle memory
-        # # ----- self.pos_up -----
-        # # -min-|forward|-max-       -min-|backward|-max-
-        # # ----- self.pos_low -----
-        # # 0-free; 1-stone
-        # self.resolution = 400
-        # self.obstacleMemoryReset('f') # 'f': forward
-        # self.obstacleMemoryReset('b') # 'b': backward
+        # obstacle memory
+        # ----- self.pos_up -----
+        # -min-|forward|-max-       -min-|backward|-max-
+        # ----- self.pos_low -----
+        # 0-free; 1-stone
+        self.resolution = 400
+        self.obstacleMemoryReset('f') # 'f': forward
+        self.obstacleMemoryReset('b') # 'b': backward
 
-        # # the obstacle in front of the bird 
-        # self.front_obstacle_max_x = 0
-        # self.front_obstacle_min_x = 999
+        # the obstacle in front of the bird, or the bird is going through
+        self.front_obstacle_update_flag = 1
+        self.front_obstacle_max_x = 0
+        self.front_obstacle_min_x = 999
+
+        # the bird status
+        self.status = '' # 'init', 'free', 'constrained', 'forecast'
+
+        # forecast time
+        self.forecast_time = 0.0
 
         # print_out
         self.time_count = 0
+
 
     def velCallback(self, msg):
 
@@ -94,7 +104,8 @@ class Agent(object):
 
         # setup accelerations
         acc_x = -0.5
-        acc_y, t_approx = self.calculateAccY(msg.y)
+        # acc_y = 0.0
+        acc_y, self.goal_y_reach_t = self.calculateAccY(msg.y, self.goal_y)
         # acc_x = self.calculateAccX(msg.x, t_approx)
         self.pub_acc_cmd.publish(Vector3(acc_x, acc_y, 0))
         
@@ -108,23 +119,28 @@ class Agent(object):
         self.dy = msg.y*DELTA_T + acc_y*DELTA_T*DELTA_T/2
 
         t = self.time_count * DELTA_T
-        print("t: %.3f, x: %.2f, y: %.9f, Vx: %.2f, Vy: %.7f, ax: %.2f, ay: %.7f, goal_y: %.2f, t_approx: %.3f" % (t, self.pos_x, self.pos_y, msg.x, msg.y, acc_x, acc_y, self.goal_y, t_approx))
+        print("t: %.3f, x: %.2f, y: %.2f, Vx: %.2f, Vy: %.2f, ax: %.2f, ay: %.2f, goal_y: %.2f, t_reach: %.3f" % (t, self.pos_x, self.pos_y, msg.x, msg.y, acc_x, acc_y, self.goal_y, self.goal_y_reach_t))
+        print("posx: %.2f, front:[%.2f, %.2f], forward:[%.2f, %.2f], backward:[%.2f, %.2f]" % (self.pos_x, self.front_obstacle_min_x, self.front_obstacle_max_x, self.forward_min_x, self.forward_max_x, self.backward_min_x, self.backward_max_x))        
+        print("The bird status is", self.status)
+        print("forecast_time: %.3f" % self.forecast_time)
         self.time_count += 1
+
 
     def laserScanCallback(self, msg):
         
-        ##### Main Logic for Each Scan #####
+        # set tunnel up and low bound
+        if self.pos_up_flag==0 or self.pos_low_flag==0:
+            self.setUpLowBound(msg)
 
-        # # Step 1: set tunnel up and low bound
-        # if self.pos_up_flag==0 or self.pos_low_flag==0:
-        #     self.setUpLowBound(msg)
+        else:
+            # update obstacle memory
+            self.obstacleUpdate(msg)
 
-        # else:
-        #     # Step 2: update obstacle memory
-        #     self.obstacleUpdate(msg)
+            # update bird status
+            self.setBirdStatus()
 
-        #     # Step 3: set y-axis goal
-        #     self.setGoalY()
+            # set y-axis goal
+            self.setGoalY()
         return
 
 
@@ -147,71 +163,91 @@ class Agent(object):
 
 
     def obstacleUpdate(self, msg):
+
         # measurement temp storage
         x_temp = []
-        y_temp_ind = [] # index in obstacle memory
+        y_temp_ind = [] # index of obstacle memory
 
-        # process scan data
+        # scan data raw processing
         for i in range(LASER_NUM):
             if msg.ranges[i] < LASER_RANGE: # obstacles
                 x = self.pos_x + msg.ranges[i]*math.cos(ANGLES[i])
                 y = self.pos_y + msg.ranges[i]*math.sin(ANGLES[i])
-                # reject up and low bound
+                # reject laser points in up and low fence
                 if y > self.pos_low and y < self.pos_up:
                     y_ind = int((y - self.pos_low) / (self.pos_up - self.pos_low) * self.resolution)
                     x_temp.append(x)
                     y_temp_ind.append(y_ind)
 
-        # arrange scan data
+        # data final processing
         if len(x_temp) > 0:
-
             x_temp = np.array(x_temp)
             y_temp_ind = np.array(y_temp_ind)
+
+            # clustering measurement points
             x_range = max(x_temp) - min(x_temp)
 
-            if abs(min(x_temp) - self.backward_min_x) < 0.2:
-                self.forward_obstacles = self.backward_obstacles
-                self.forward_max_x = self.backward_max_x
-                self.forward_min_x = self.backward_min_x
-                self.obstacleMemoryReset('b')
-
-            if x_range < OBSTACLE_WIDTH:
-                self.forward_max_x = max([max(x_temp), self.forward_max_x])
-                self.forward_min_x = min([min(x_temp), self.forward_min_x])
+            if x_range < OBSTACLE_WIDTH_SUP:
+                # refresh memory if necessary
+                if abs(min(x_temp) - self.backward_min_x) < 0.2:
+                    self.forward_obstacles = self.backward_obstacles
+                    self.forward_max_x = self.backward_max_x
+                    self.forward_min_x = self.backward_min_x
+                    self.obstacleMemoryReset('b')
+                    self.front_obstacle_update_flag = 0
+                # update forward obstacle memory
+                self.forward_max_x = max(max(x_temp), self.forward_max_x)
+                self.forward_min_x = min(min(x_temp), self.forward_min_x)
                 self.forward_obstacles[y_temp_ind] = 1
-            elif x_range > OBSTACLE_GAP - OBSTACLE_WIDTH:
+
+            else:
+                # forward obstacles & backward obstacles
                 x_border = (max(x_temp) + min(x_temp)) / 2
                 forward_index = np.where(x_temp < x_border)
                 backward_index = np.where(x_temp >= x_border)
 
                 x_forward = x_temp[forward_index]
-                self.forward_max_x = max([max(x_forward), self.forward_max_x])
-                self.forward_min_x = min([min(x_forward), self.forward_min_x])
-                y_num_forward = y_temp_ind[forward_index]
-                self.forward_obstacles[y_num_forward] = 1
+                self.forward_max_x = max(max(x_forward), self.forward_max_x)
+                self.forward_min_x = min(min(x_forward), self.forward_min_x)
+                y_ind_forward = y_temp_ind[forward_index]
+                self.forward_obstacles[y_ind_forward] = 1
 
                 x_backward = x_temp[backward_index]
                 self.backward_max_x = max([max(x_backward), self.backward_max_x])
                 self.backward_min_x = min([min(x_backward), self.backward_min_x])
-                y_num_backward = y_temp_ind[backward_index]
-                self.backward_obstacles[y_num_backward] = 1
-            else:
-                print("Unknown Error in Obstacle Updating!!!")
-            
-        print("posx: %.2f, front:[%.2f, %.2f], forward:[%.2f, %.2f], backward:[%.2f, %.2f]" % (self.pos_x, self.front_obstacle_min_x, self.front_obstacle_max_x, self.forward_min_x, self.forward_max_x, self.backward_min_x, self.backward_max_x))        
+                y_ind_backward = y_temp_ind[backward_index]
+                self.backward_obstacles[y_ind_backward] = 1
+
+
+    def setBirdStatus(self):
+        # update front obstacle
+        if self.front_obstacle_update_flag == 1:
+            self.front_obstacle_max_x = self.forward_max_x + 0.25
+            self.front_obstacle_min_x = self.forward_min_x - 0.20
+
+        # update bird status
+        if self.forward_min_x == 999:
+            self.status = 'init'
+        elif self.pos_x < self.front_obstacle_min_x:
+            self.status = 'free'
+        elif self.pos_x >= self.front_obstacle_min_x and self.pos_x <= self.front_obstacle_max_x and self.front_obstacle_update_flag == 1:
+            self.status = 'constrained'
+        elif self.pos_x >= self.front_obstacle_min_x and self.pos_x <= self.front_obstacle_max_x and self.front_obstacle_update_flag == 0:
+            self.status = 'forecast'
+        elif self.pos_x > self.front_obstacle_max_x:
+            self.status = 'free'
+            self.front_obstacle_update_flag = 1
+            self.forecast_time = 0.0
 
 
     def setGoalY(self):
 
-        # update obstacle x ahead of the bird
-        if self.pos_x > self.forward_min_x - 1.0:
-            self.front_obstacle_max_x = self.forward_max_x + 0.25
-            self.front_obstacle_min_x = self.forward_min_x - 0.15
+        if self.status == 'constrained' or self.status == 'init':
+            return
+        elif self.status == 'free' or self.status == 'forecast':
 
-        # do not change y-goal when pass the gate
-        if self.pos_x > self.front_obstacle_min_x and self.pos_x < self.front_obstacle_max_x:
-            pass
-        else:
+            # calculate goal_y from forward obstacle memory: 0-free, 1-stone
+            goal_y = 0.0
             signs = np.diff(np.concatenate((np.array([1]), self.forward_obstacles, np.array([1])), axis=0))
             zero_starts = np.where(signs==-1)[0]
             zero_ends = np.where(signs==1)[0]
@@ -225,21 +261,24 @@ class Agent(object):
             if len(zero_select_ind[0]) == 1:
                 # find only one possible gate
                 index = np.argmin(zero_select)
-                self.goal_y = (zero_starts[index] + zero_ends[index]) / 2 / self.resolution * (self.pos_up - self.pos_low) + self.pos_low
+                goal_y = (zero_starts[index] + zero_ends[index]) / 2 / self.resolution * (self.pos_up - self.pos_low) + self.pos_low
 
             elif len(zero_select_ind[0]) > 1:
                 # find multiple possible gates, choose the closest one
                 goals = (zero_starts[zero_select_ind] + zero_ends[zero_select_ind]) / 2 / self.resolution * (self.pos_up - self.pos_low) + self.pos_low
                 goal_ind = np.argmin(np.abs(goals - self.pos_y))
-                self.goal_y = goals[goal_ind]
+                goal_y = goals[goal_ind]
             else:
                 # don't find possible gate, to explore unknown areas
                 index = np.argmax(zero_count)
-                self.goal_y = (zero_starts[index] + zero_ends[index]) / 2 / self.resolution * (self.pos_up - self.pos_low) + self.pos_low
+                goal_y = (zero_starts[index] + zero_ends[index]) / 2 / self.resolution * (self.pos_up - self.pos_low) + self.pos_low
+  
+            # print(zero_count, zero_best)
 
-            
-            print(zero_count, zero_best)
-            print("-----------------------------------")
+            if self.status == 'free':
+                self.goal_y = goal_y
+            if self.status == 'forecast':
+                _, self.forecast_time = self.calculateAccY(0.00, goal_y)
 
 
     def obstacleMemoryReset(self, flag):
@@ -251,15 +290,13 @@ class Agent(object):
             self.backward_obstacles = np.zeros(self.resolution)
             self.backward_max_x = 0
             self.backward_min_x = 999
-        else:
-            print("Wrong flag received in function obstacleMemoryReset")
             
 
-    def calculateAccY(self, Vy):
+    def calculateAccY(self, Vy, goal_y):
         # solve y-axis acceleration by MPC --> QP
 
         # starttime = time.time()
-        Dy = self.goal_y - self.pos_y
+        Dy = goal_y - self.pos_y
         x0 = np.array([[Dy],[Vy]])
         q = np.dot(F.T, x0)
         u = solve_qp(H, q, G, h, solver="osqp")
@@ -273,8 +310,9 @@ class Agent(object):
         except:
             t_approx = 0.0
         # end_time = time.time()
-        # print("QP time cost %.7f" % ((end_time - starttime))) # about 8ms
+        # print("QP time cost %.7f" % ((end_time - starttime))) # about 0.8ms
         return ay, t_approx
+
 
     def calculateAccX(self, Vx, t_approx):
         
