@@ -22,12 +22,14 @@ GATE_HEIGHT = 0.50 # m
 
 # my constants
 OBSTACLE_WIDTH_SUP = 0.60 # m
-UP_LOW_FENCE = 0.7 # m
+UP_LOW_FENCE = 0.75 # m
+L_BACK = 0.20 # m
+L_FORWARD = 0.15 # m
 
 T_REACH_MAX = 17 * DELTA_T # s
-FREE_X = 1.05 # m
+FREE_X = 1.15 # m
 VX_SAFE = FREE_X / T_REACH_MAX + AX_MAX * T_REACH_MAX / 2
-VX_DANGER = 4.80 # m/s
+VX_DANGER = 4.70 # m/s
 
 # y-axis MPC control constants
 N = 25
@@ -96,7 +98,7 @@ class Agent(object):
         # -min-|forward|-max-       -min-|backward|-max-
         # ----- self.pos_low -----
         # 0-free; 1-stone
-        self.resolution = 500
+        self.resolution = 300
         self.obstacleMemoryReset('f') # 'f': forward
         self.obstacleMemoryReset('b') # 'b': backward
 
@@ -114,6 +116,7 @@ class Agent(object):
         # print_out
         self.time_count = 0
         self.max_count = 0
+        self.max_running_time = 0.0
 
 
     def velCallback(self, msg):
@@ -144,8 +147,10 @@ class Agent(object):
         self.setAcc()
 
         end_time = time.time()
-        # print("Total time cost %.7f" % ((end_time - start_time))) # < 2ms
-
+        dt = end_time - start_time
+        self.max_running_time = max(self.max_running_time, dt)
+        print("Max total time cost: %.7f" % (self.max_running_time)) # < 10ms
+        print("----------------------------------------")
 
     def obstacleMemoryReset(self, flag):
         if flag == 'f':
@@ -238,8 +243,8 @@ class Agent(object):
     def setBirdStatus(self):
         # update front obstacle
         if self.front_obstacle_update_flag == 1:
-            self.front_obstacle_max_x = self.forward_max_x + 0.25
-            self.front_obstacle_min_x = self.forward_min_x - 0.20
+            self.front_obstacle_max_x = self.forward_max_x + L_BACK
+            self.front_obstacle_min_x = self.forward_min_x - L_FORWARD
 
         # update bird status
         if self.forward_min_x == 999:
@@ -253,8 +258,8 @@ class Agent(object):
         elif self.pos_x > self.front_obstacle_max_x:
             self.status = 'free'
             self.front_obstacle_update_flag = 1
-            self.front_obstacle_max_x = self.forward_max_x + 0.25
-            self.front_obstacle_min_x = self.forward_min_x - 0.20
+            self.front_obstacle_max_x = self.forward_max_x + L_BACK
+            self.front_obstacle_min_x = self.forward_min_x - L_FORWARD
         
         print("The bird status is", self.status)
 
@@ -275,7 +280,7 @@ class Agent(object):
             zero_best = round(GATE_HEIGHT / (self.pos_up - self.pos_low) * self.resolution)
             
             zero_select = np.abs(zero_count - zero_best)
-            zero_select_ind = np.where(zero_select < 0.15*zero_best)
+            zero_select_ind = np.where(zero_select < 0.100*zero_best)
 
             if len(zero_select_ind[0]) == 1:
                 # find only one possible gate
@@ -322,7 +327,7 @@ class Agent(object):
 
         t = self.time_count * DELTA_T
         print("t: %.3f, x: %.2f, y: %.2f, Vx: %.2f, Vy: %.2f, ax: %.2f, ay: %.2f, goal_y: %.2f, t_reach: %.3f" % (t, self.pos_x, self.pos_y, self.vel_buffer.x, self.vel_buffer.y, acc_x, acc_y, self.goal_y, self.goal_y_reach_count*DELTA_T))
-        print("-------------------------%.1f"%self.max_count)
+        print("Max count: %.1f"%self.max_count)
         self.time_count += 1
 
 
@@ -359,10 +364,9 @@ class Agent(object):
             if self.goal_y_reach_count > 0:
                 ax = self.onlineMpcSolver(self.pos_x, self.vel_buffer.x, self.goal_y_reach_count, self.front_obstacle_min_x)
             else:
-                if self.vel_buffer.x + AX_MAX*DELTA_T > VX_DANGER:
-                    ax = 0.0
-                else:
-                    ax = AX_MAX
+                ax = AX_MAX
+            if self.vel_buffer.x + ax*DELTA_T > VX_DANGER:
+                ax = 0.0
         
         elif self.status == 'constrained':
             Dv = VX_SAFE - self.vel_buffer.x
@@ -371,7 +375,7 @@ class Agent(object):
         elif self.status == 'forecast':
             if self.forecast_count > 0:
                 t = self.forecast_count*DELTA_T
-                Vx_desire = FREE_X/t + AX_MAX*t/2
+                Vx_desire = min(FREE_X/t + AX_MAX*t/2, VX_DANGER)
                 print("Vx desire = %.2f" % Vx_desire)
                 Dv = Vx_desire - self.vel_buffer.x
                 ax = max(min(Dv / DELTA_T, AX_MAX), -AX_MAX)
