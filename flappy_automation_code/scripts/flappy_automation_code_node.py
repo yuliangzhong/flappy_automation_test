@@ -22,6 +22,8 @@ OBSTACLE_GAP = 1.92 # m
 GATE_HEIGHT = 0.50 # m
 UP_LOW_FENCE = 0.7 # m
 
+T_REACH_MAX = 0.65 # s
+
 # y-axis MPC control constants
 N = 20
 A = np.array([[1, -DELTA_T], [0, 1]])
@@ -61,6 +63,7 @@ class Agent(object):
         self.pos_y = 0.0
         self.dx = 0.0
         self.dy = 0.0
+        self.vel_buffer = Vector3()
 
         # define the y-axis goal
         self.goal_y = 0.0
@@ -87,7 +90,7 @@ class Agent(object):
         self.front_obstacle_min_x = 999
 
         # the bird status
-        self.status = '' # 'init', 'free', 'constrained', 'forecast'
+        self.status = 'init' # 'init', 'free', 'constrained', 'forecast'
 
         # forecast time
         self.forecast_time = 0.0
@@ -97,36 +100,14 @@ class Agent(object):
 
 
     def velCallback(self, msg):
-
-        # position integral
-        self.pos_x += self.dx
-        self.pos_y += self.dy
-
-        # setup accelerations
-        acc_x = -0.5
-        # acc_y = 0.0
-        acc_y, self.goal_y_reach_t = self.calculateAccY(msg.y, self.goal_y)
-        # acc_x = self.calculateAccX(msg.x, t_approx)
-        self.pub_acc_cmd.publish(Vector3(acc_x, acc_y, 0))
-        
-        # log dx dy in this time step
-        # acc_x, acc_y should satisfy constraints
-        acc_x = max(min(acc_x, AX_MAX), -AX_MAX)
-        acc_y = max(min(acc_y, AY_MAX), -AY_MAX)
-        # Vx >= 0
-        Vx_p = max(msg.x + acc_x*DELTA_T, 0.0)
-        self.dx = (msg.x + Vx_p) * DELTA_T / 2
-        self.dy = msg.y*DELTA_T + acc_y*DELTA_T*DELTA_T/2
-
-        t = self.time_count * DELTA_T
-        print("t: %.3f, x: %.2f, y: %.2f, Vx: %.2f, Vy: %.2f, ax: %.2f, ay: %.2f, goal_y: %.2f, t_reach: %.3f" % (t, self.pos_x, self.pos_y, msg.x, msg.y, acc_x, acc_y, self.goal_y, self.goal_y_reach_t))
-        print("posx: %.2f, front:[%.2f, %.2f], forward:[%.2f, %.2f], backward:[%.2f, %.2f]" % (self.pos_x, self.front_obstacle_min_x, self.front_obstacle_max_x, self.forward_min_x, self.forward_max_x, self.backward_min_x, self.backward_max_x))        
-        print("The bird status is", self.status)
-        print("forecast_time: %.3f" % self.forecast_time)
-        self.time_count += 1
+        self.vel_buffer = msg
 
 
     def laserScanCallback(self, msg):
+        
+        # position integral
+        self.pos_x += self.dx
+        self.pos_y += self.dy
         
         # set tunnel up and low bound
         if self.pos_up_flag==0 or self.pos_low_flag==0:
@@ -139,9 +120,9 @@ class Agent(object):
             # update bird status
             self.setBirdStatus()
 
-            # set y-axis goal
-            self.setGoalY()
-        return
+        # take actions based on current bird status
+        self.setGoalY()
+        self.setAcc()
 
 
     def setUpLowBound(self, msg):
@@ -217,6 +198,8 @@ class Agent(object):
                 self.backward_min_x = min([min(x_backward), self.backward_min_x])
                 y_ind_backward = y_temp_ind[backward_index]
                 self.backward_obstacles[y_ind_backward] = 1
+        
+        print("posx: %.2f, front:[%.2f, %.2f], forward:[%.2f, %.2f], backward:[%.2f, %.2f]" % (self.pos_x, self.front_obstacle_min_x, self.front_obstacle_max_x, self.forward_min_x, self.forward_max_x, self.backward_min_x, self.backward_max_x))        
 
 
     def setBirdStatus(self):
@@ -237,7 +220,8 @@ class Agent(object):
         elif self.pos_x > self.front_obstacle_max_x:
             self.status = 'free'
             self.front_obstacle_update_flag = 1
-            self.forecast_time = 0.0
+        
+        print("The bird status is", self.status)
 
 
     def setGoalY(self):
@@ -278,7 +262,8 @@ class Agent(object):
             if self.status == 'free':
                 self.goal_y = goal_y
             if self.status == 'forecast':
-                _, self.forecast_time = self.calculateAccY(0.00, goal_y)
+                _, self.forecast_time = self.calculateAccY(self.vel_buffer.y, goal_y)
+                print("forcast time %.3f, goal_y %.3f" %(self.forecast_time, goal_y))
 
 
     def obstacleMemoryReset(self, flag):
@@ -343,6 +328,29 @@ class Agent(object):
 
         return max(min(ax, AX_MAX), -AX_MAX)
 
+    def setAcc(self):
+
+        # setup accelerations
+        acc_x = -0.5
+        # acc_y = 0.0
+        acc_y, self.goal_y_reach_t = self.calculateAccY(self.vel_buffer.y, self.goal_y)
+        # acc_x = self.calculateAccX(msg.x, t_approx)
+        self.pub_acc_cmd.publish(Vector3(acc_x, acc_y, 0))
+        
+        # log dx dy in this time step
+        # acc_x, acc_y should satisfy constraints
+        acc_x = max(min(acc_x, AX_MAX), -AX_MAX)
+        acc_y = max(min(acc_y, AY_MAX), -AY_MAX)
+        # Vx >= 0
+        Vx_p = max(self.vel_buffer.x + acc_x*DELTA_T, 0.0)
+        self.dx = (self.vel_buffer.x + Vx_p) * DELTA_T / 2
+        self.dy = self.vel_buffer.y*DELTA_T + acc_y*DELTA_T*DELTA_T/2
+
+        t = self.time_count * DELTA_T
+        print("t: %.3f, x: %.2f, y: %.2f, Vx: %.2f, Vy: %.2f, ax: %.2f, ay: %.2f, goal_y: %.2f, t_reach: %.3f" % (t, self.pos_x, self.pos_y, self.vel_buffer.x, self.vel_buffer.y, acc_x, acc_y, self.goal_y, self.goal_y_reach_t))
+        self.time_count += 1
+
+        
 
 if __name__ == '__main__':
     try:
