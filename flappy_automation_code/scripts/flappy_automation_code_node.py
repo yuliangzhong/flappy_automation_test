@@ -24,9 +24,10 @@ GATE_HEIGHT = 0.50 # m
 OBSTACLE_WIDTH_SUP = 0.60 # m
 UP_LOW_FENCE = 0.7 # m
 
-T_REACH_MAX = 0.65 # s
+T_REACH_MAX = 17 * DELTA_T # s
 FREE_X = 1.05 # m
 VX_SAFE = FREE_X / T_REACH_MAX + AX_MAX * T_REACH_MAX / 2
+VX_DANGER = 4.80 # m/s
 
 # y-axis MPC control constants
 N = 25
@@ -95,7 +96,7 @@ class Agent(object):
         # -min-|forward|-max-       -min-|backward|-max-
         # ----- self.pos_low -----
         # 0-free; 1-stone
-        self.resolution = 400
+        self.resolution = 500
         self.obstacleMemoryReset('f') # 'f': forward
         self.obstacleMemoryReset('b') # 'b': backward
 
@@ -112,6 +113,7 @@ class Agent(object):
 
         # print_out
         self.time_count = 0
+        self.max_count = 0
 
 
     def velCallback(self, msg):
@@ -201,7 +203,7 @@ class Agent(object):
 
             if x_range < OBSTACLE_WIDTH_SUP:
                 # refresh memory if necessary
-                if abs(min(x_temp) - self.backward_min_x) < 0.2:
+                if min(x_temp) > self.backward_min_x - 0.2:
                     self.forward_obstacles = self.backward_obstacles
                     self.forward_max_x = self.backward_max_x
                     self.forward_min_x = self.backward_min_x
@@ -273,7 +275,7 @@ class Agent(object):
             zero_best = round(GATE_HEIGHT / (self.pos_up - self.pos_low) * self.resolution)
             
             zero_select = np.abs(zero_count - zero_best)
-            zero_select_ind = np.where(zero_select < 0.2*zero_best)
+            zero_select_ind = np.where(zero_select < 0.15*zero_best)
 
             if len(zero_select_ind[0]) == 1:
                 # find only one possible gate
@@ -290,7 +292,7 @@ class Agent(object):
                 index = np.argmax(zero_count)
                 goal_y = (zero_starts[index] + zero_ends[index]) / 2 / self.resolution * (self.pos_up - self.pos_low) + self.pos_low
   
-            # print(zero_count, zero_best)
+            print(zero_count, zero_best)
 
             if self.status == 'free' or self.status == 'constrained':
                 self.goal_y = goal_y
@@ -305,6 +307,7 @@ class Agent(object):
         # acc_x = -0.5
         # acc_y = 0.0
         acc_y, self.goal_y_reach_count = self.calculateAccY(self.vel_buffer.y, self.goal_y)
+        self.max_count = max(self.max_count, self.goal_y_reach_count)
         acc_x = self.calculateAccX()
         self.pub_acc_cmd.publish(Vector3(acc_x, acc_y, 0))
         
@@ -319,6 +322,7 @@ class Agent(object):
 
         t = self.time_count * DELTA_T
         print("t: %.3f, x: %.2f, y: %.2f, Vx: %.2f, Vy: %.2f, ax: %.2f, ay: %.2f, goal_y: %.2f, t_reach: %.3f" % (t, self.pos_x, self.pos_y, self.vel_buffer.x, self.vel_buffer.y, acc_x, acc_y, self.goal_y, self.goal_y_reach_count*DELTA_T))
+        print("-------------------------%.1f"%self.max_count)
         self.time_count += 1
 
 
@@ -355,7 +359,10 @@ class Agent(object):
             if self.goal_y_reach_count > 0:
                 ax = self.onlineMpcSolver(self.pos_x, self.vel_buffer.x, self.goal_y_reach_count, self.front_obstacle_min_x)
             else:
-                ax = AX_MAX
+                if self.vel_buffer.x + AX_MAX*DELTA_T > VX_DANGER:
+                    ax = 0.0
+                else:
+                    ax = AX_MAX
         
         elif self.status == 'constrained':
             Dv = VX_SAFE - self.vel_buffer.x
@@ -370,33 +377,12 @@ class Agent(object):
                 ax = max(min(Dv / DELTA_T, AX_MAX), -AX_MAX)
             else:
                 ax = AX_MAX
-        # else:
-        #     if self.pos_x > self.front_obstacle_min_x and self.pos_x < self.front_obstacle_max_x:
-        #         V_out = 3.3 # m/s
-        #         Dx = self.front_obstacle_max_x - self.pos_x
-        #         S = (Vx**2 - V_out**2)/2/AX_MAX+ 2*(Vx*DELTA_T + AX_MAX*DELTA_T*DELTA_T/2) # [m]
-        #         if Dx > S:
-        #             ax = AX_MAX
-        #         else:
-        #             ax = -AX_MAX
-        #     else:
-        #         Dx = self.front_obstacle_min_x - self.pos_x
-        #         S = Vx * t_approx
-        #         if S <= Dx:
-        #             ax = 2 * (Dx - S) / (t_approx**2)
-        #         elif S <= 2*Dx:
-        #             ax = 2 * (Dx - S) / (t_approx**2)
-        #         else:
-        #             ax = -AX_MAX
-        #             print("bad!")
 
-        # return max(min(ax, AX_MAX), -AX_MAX)
         return ax
 
 
     def onlineMpcSolver(self, px, vx, N, r):
 
-        print("N = %.1f, r = %.3f" % (N, r))
         # x_+ = Ax + Bu
         A = np.array([[1, DELTA_T], [0, 1]])
         B = np.array([[DELTA_T**2/2],[DELTA_T]])
