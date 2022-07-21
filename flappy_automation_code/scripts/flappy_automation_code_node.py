@@ -29,7 +29,7 @@ L_FORWARD = 0.15 # m
 T_REACH_MAX = 17 * DELTA_T # s
 FREE_X = 1.15 # m
 VX_SAFE = FREE_X / T_REACH_MAX + AX_MAX * T_REACH_MAX / 2
-VX_DANGER = 4.70 # m/s
+VX_DANGER = 4.50 # m/s
 
 # y-axis MPC control constants
 N = 25
@@ -152,6 +152,7 @@ class Agent(object):
         print("Max total time cost: %.7f" % (self.max_running_time)) # < 10ms
         print("----------------------------------------")
 
+
     def obstacleMemoryReset(self, flag):
         if flag == 'f':
             self.forward_obstacles = np.zeros(self.resolution)
@@ -266,7 +267,7 @@ class Agent(object):
 
     def setGoalY(self):
 
-        if self.status == 'init':
+        if self.status == 'init' or self.status == 'constrained':
             return
         elif self.status == 'free' or self.status == 'forecast':
 
@@ -279,12 +280,12 @@ class Agent(object):
             zero_count = zero_ends - zero_starts
             zero_best = round(GATE_HEIGHT / (self.pos_up - self.pos_low) * self.resolution)
             
-            zero_select = np.abs(zero_count - zero_best)
-            zero_select_ind = np.where(zero_select < 0.100*zero_best)
-
+            zero_select = zero_count - zero_best
+            zero_select_ind = np.where((zero_select < 0.100*zero_best) & (zero_select > 0.0))
+            # print(zero_select, zero_select_ind[0])
             if len(zero_select_ind[0]) == 1:
                 # find only one possible gate
-                index = np.argmin(zero_select)
+                index = zero_select_ind[0][0]
                 goal_y = (zero_starts[index] + zero_ends[index]) / 2 / self.resolution * (self.pos_up - self.pos_low) + self.pos_low
 
             elif len(zero_select_ind[0]) > 1:
@@ -299,7 +300,7 @@ class Agent(object):
   
             print(zero_count, zero_best)
 
-            if self.status == 'free' or self.status == 'constrained':
+            if self.status == 'free':
                 self.goal_y = goal_y
             if self.status == 'forecast':
                 _, self.forecast_count = self.calculateAccY(self.vel_buffer.y, goal_y)
@@ -334,7 +335,6 @@ class Agent(object):
     def calculateAccY(self, Vy, goal_y):
         # solve y-axis acceleration by MPC --> QP
 
-        # starttime = time.time()
         Dy = goal_y - self.pos_y
         x0 = np.array([[Dy],[Vy]])
         q = np.dot(F.T, x0)
@@ -347,8 +347,6 @@ class Agent(object):
             n_time_gaps = N - np.where(np.abs(xs)[::-1]>0.015)[0][0] + 1
         except:
             n_time_gaps = 0
-        # end_time = time.time()
-        # print("QP time cost %.7f" % ((end_time - starttime))) # about 0.8ms
         return ay, n_time_gaps
 
 
